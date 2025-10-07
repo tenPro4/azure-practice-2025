@@ -1,8 +1,3 @@
-# ASP.NET Core (.NET Framework)
-# Build and test ASP.NET Core projects targeting the full .NET Framework.
-# Add steps that publish symbols, save build artifacts, and more:
-# https://docs.microsoft.com/azure/devops/pipelines/languages/dotnet-core
-
 trigger:
 - main
 
@@ -13,9 +8,10 @@ variables:
   solution: '**/*.sln'
   buildPlatform: 'Any CPU'
   buildConfiguration: 'Release'
+  # 设置你的 Azure Artifacts feed 名称
+  artifactFeed: 'binet25'
 
 steps:
-
 - task: DotNetCoreCLI@2
   displayName: 'Restore packages'
   inputs:
@@ -29,15 +25,87 @@ steps:
     projects: '**/*.csproj'
     arguments: '--configuration $(buildConfiguration) --no-restore'
 
+# 检查 SSP.Entities 的版本变动并打包
+- task: PowerShell@2
+  displayName: 'Check and Pack SSP.Entities'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $projectPath = "SSP.Entities/SSP.Entities.csproj"
+      
+      # 读取当前版本
+      [xml]$csproj = Get-Content $projectPath
+      $currentVersion = $csproj.Project.PropertyGroup.Version
+      
+      if ([string]::IsNullOrEmpty($currentVersion)) {
+        $currentVersion = "1.0.0"
+      }
+      
+      Write-Host "Current SSP.Entities version: $currentVersion"
+      
+      # 检查 feed 中是否已存在此版本
+      $feedCheck = dotnet nuget list source
+      Write-Host "Feed sources: $feedCheck"
+      
+      # 打包项目
+      Write-Host "Packing SSP.Entities..."
+      dotnet pack $projectPath --configuration $(buildConfiguration) --no-build --output $(Build.ArtifactStagingDirectory)/packages
+      
+      Write-Host "##vso[task.setvariable variable=EntitiesVersion]$currentVersion"
+      Write-Host "##vso[task.setvariable variable=PackEntities]true"
+
+# 检查 SSP.Services 的版本变动并打包
+- task: PowerShell@2
+  displayName: 'Check and Pack SSP.Services'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $projectPath = "SSP.Services/SSP.Services.csproj"
+      
+      # 读取当前版本
+      [xml]$csproj = Get-Content $projectPath
+      $currentVersion = $csproj.Project.PropertyGroup.Version
+      
+      if ([string]::IsNullOrEmpty($currentVersion)) {
+        $currentVersion = "1.0.0"
+      }
+      
+      Write-Host "Current SSP.Services version: $currentVersion"
+      
+      # 打包项目
+      Write-Host "Packing SSP.Services..."
+      dotnet pack $projectPath --configuration $(buildConfiguration) --no-build --output $(Build.ArtifactStagingDirectory)/packages
+      
+      Write-Host "##vso[task.setvariable variable=ServicesVersion]$currentVersion"
+      Write-Host "##vso[task.setvariable variable=PackServices]true"
+
+# 推送 NuGet 包到 Azure Artifacts
+- task: NuGetCommand@2
+  displayName: 'Push NuGet packages to Azure Artifacts'
+  condition: or(eq(variables['PackEntities'], 'true'), eq(variables['PackServices'], 'true'))
+  inputs:
+    command: 'push'
+    packagesToPush: '$(Build.ArtifactStagingDirectory)/packages/*.nupkg'
+    nuGetFeedType: 'internal'
+    publishVstsFeed: '$(artifactFeed)'
+    allowPackageConflicts: false
+
 - task: DotNetCoreCLI@2
   displayName: 'Publish'
   inputs:
     command: 'publish'
     projects: '**/*.csproj'
-    arguments: '--configuration $(buildConfiguration) --no-build -o $(Build.ArtifactStagingDirectory)'
+    arguments: '--configuration $(buildConfiguration) --no-build -o $(Build.ArtifactStagingDirectory)/publish'
 
 - task: PublishBuildArtifacts@1
-  displayName: 'Publish Artifacts'
+  displayName: 'Publish Build Artifacts'
   inputs:
-    pathToPublish: '$(Build.ArtifactStagingDirectory)'
+    pathToPublish: '$(Build.ArtifactStagingDirectory)/publish'
     artifactName: 'drop'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish NuGet Packages'
+  condition: or(eq(variables['PackEntities'], 'true'), eq(variables['PackServices'], 'true'))
+  inputs:
+    pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
+    artifactName: 'nuget-packages'
