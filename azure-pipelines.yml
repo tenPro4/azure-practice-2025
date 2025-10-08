@@ -145,58 +145,15 @@ steps:
       }
 
 # 推送 NuGet 包到 Azure Artifacts
-- task: PowerShell@2
+- task: NuGetCommand@2
   displayName: 'Push NuGet Packages to Azure Artifacts'
   condition: eq(variables['HasNewPackages'], 'true')
   inputs:
-    targetType: 'inline'
-    script: |
-      $feedUrl = "https://pkgs.dev.azure.com/binet25/_packaging/$(artifactFeed)/nuget/v3/index.json"
-      $packagesDir = "$(Build.ArtifactStagingDirectory)/packages"
-      
-      $packages = Get-ChildItem "$packagesDir/*.nupkg" -ErrorAction SilentlyContinue
-      
-      if ($packages.Count -eq 0) {
-        Write-Host "##[warning]No packages found to push"
-        exit 0
-      }
-      
-      Write-Host "=== Pushing $($packages.Count) package(s) ==="
-      
-      $pushErrors = 0
-      foreach ($package in $packages) {
-        Write-Host ""
-        Write-Host "Pushing: $($package.Name)"
-        
-        try {
-          dotnet nuget push $package.FullName `
-            --source $feedUrl `
-            --api-key az `
-            --skip-duplicate `
-            --no-symbols
-          
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "##[section]✓ Successfully pushed $($package.Name)"
-          } else {
-            Write-Host "##[error]✗ Failed to push $($package.Name)"
-            $pushErrors++
-          }
-        } catch {
-          Write-Host "##[error]Exception while pushing $($package.Name): $_"
-          $pushErrors++
-        }
-      }
-      
-      Write-Host ""
-      Write-Host "=== Push Summary ==="
-      Write-Host "Total packages: $($packages.Count)"
-      Write-Host "Successful: $($packages.Count - $pushErrors)"
-      Write-Host "Failed: $pushErrors"
-      
-      if ($pushErrors -gt 0) {
-        Write-Host "##[error]Some packages failed to push"
-        exit 1
-      }
+    command: 'push'
+    packagesToPush: '$(Build.ArtifactStagingDirectory)/packages/*.nupkg'
+    nuGetFeedType: 'internal'
+    publishVstsFeed: '$(artifactFeed)'
+    allowPackageConflicts: true
 
 - task: DotNetCoreCLI@2
   displayName: 'Publish'
