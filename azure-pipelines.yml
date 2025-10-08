@@ -180,13 +180,19 @@ steps:
   inputs:
     targetType: 'inline'
     script: |
-      $zipFilePath = "$(Build.ArtifactStagingDirectory)/publish/drop.zip"  # Path to the zipped artifact
+      $zipFilePath = "$(Pipeline.Workspace)/drop/SPP.zip"  # Path to the zipped artifact
       $extractPath = "$(Build.ArtifactStagingDirectory)/publish"  # Path to extract
       $destPath = "C:\inetpub\wwwroot\project1"  # IIS directory
 
+      # Check if ZIP file exists
+      if (-Not (Test-Path $zipFilePath)) {
+          Write-Host "##[error]The ZIP file does not exist at $zipFilePath"
+          exit 1
+      }
+
       # Create extraction directory if it doesn't exist
       if (-Not (Test-Path $extractPath)) {
-        New-Item -ItemType Directory -Path $extractPath -Force
+          New-Item -ItemType Directory -Path $extractPath -Force
       }
 
       # Extract the ZIP file
@@ -195,7 +201,7 @@ steps:
 
       # Ensure destination directory exists
       if (-Not (Test-Path $destPath)) {
-        New-Item -ItemType Directory -Path $destPath -Force
+          New-Item -ItemType Directory -Path $destPath -Force
       }
 
       # Copy files from the extraction directory to the IIS directory
