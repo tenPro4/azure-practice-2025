@@ -216,7 +216,8 @@ steps:
       $extractedItems = Get-ChildItem -Path $tempExtractPath
       Write-Host "Extracted items count: $($extractedItems.Count)"
       foreach ($item in $extractedItems) {
-        Write-Host "  - $($item.Name) [$($item.PSIsContainer ? 'Directory' : 'File')]"
+        $itemType = if ($item.PSIsContainer) { 'Directory' } else { 'File' }
+        Write-Host "  - $($item.Name) [$itemType]"
       }
       
       # 如果只有一个 zip 文件，可能是嵌套打包，需要再次解压
