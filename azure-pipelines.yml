@@ -156,11 +156,13 @@ steps:
     allowPackageConflicts: true
 
 - task: DotNetCoreCLI@2
-  displayName: 'Publish'
+  displayName: 'Publish API Project'
   inputs:
     command: 'publish'
-    projects: '**/*.csproj'
+    projects: '**/*API.csproj'
     arguments: '--configuration $(buildConfiguration) --no-build -o $(Build.ArtifactStagingDirectory)/publish'
+    publishWebProjects: false
+    zipAfterPublish: false
 
 - task: PublishBuildArtifacts@1
   displayName: 'Publish Build Artifacts'
@@ -225,11 +227,24 @@ steps:
         Write-Host "##[warning]Could not stop application pool (it may not exist or already stopped)"
       }
       
-      # 复制文件到 IIS 目录（覆盖现有文件）
-      Write-Host "Copying files to IIS directory..."
+      # 清空目标目录（可选，如果你想完全清空旧文件）
+      Write-Host "Cleaning target directory..."
+      if (Test-Path $iisPath) {
+        Get-ChildItem -Path $iisPath -Recurse | Remove-Item -Force -Recurse
+        Write-Host "✓ Old files removed"
+      }
+      
+      # 复制解压后的文件到 IIS 目录（覆盖现有文件）
+      Write-Host "Deploying extracted files to IIS directory..."
+      Write-Host "Copying from: $tempExtractPath"
+      Write-Host "Copying to: $iisPath"
+      
       Copy-Item -Path "$tempExtractPath\*" -Destination $iisPath -Recurse -Force
       
+      # 验证部署
+      $deployedFiles = Get-ChildItem -Path $iisPath -Recurse
       Write-Host "✓ Files deployed successfully"
+      Write-Host "Total files deployed: $($deployedFiles.Count)"
       
       # 启动应用池
       try {
