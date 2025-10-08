@@ -10,6 +10,10 @@ variables:
   buildConfiguration: 'Release'
   # 设置你的 Azure Artifacts feed 名称
   artifactFeed: 'binet25'
+  # 定义需要打包的项目模式（支持通配符）
+  packableProjects: |
+    **/*.Entities.csproj
+    **/*.Services.csproj
 
 steps:
 - task: DotNetCoreCLI@2
@@ -25,87 +29,174 @@ steps:
     projects: '**/*.csproj'
     arguments: '--configuration $(buildConfiguration) --no-restore'
 
+# 运行单元测试
 - task: DotNetCoreCLI@2
   displayName: 'Run Unit Tests'
   inputs:
     command: 'test'
     projects: '**/*.UnitTest.csproj'
     arguments: '--configuration $(buildConfiguration) --no-build'
+    publishTestResults: true
 
-- task: PublishTestResults@2
-  displayName: 'Publish Test Results'
-  condition: succeededOrFailed()
-  inputs:
-    testResultsFormat: 'VSTest'
-    testResultsFiles: '$(Build.ArtifactStagingDirectory)/TestResults/**/*.trx'
-    mergeTestResults: true
-    failTaskOnFailedTests: true
-    testRunTitle: 'SPP Unit Tests'
-
-# 检查 SSP.Entities 的版本变动并打包
+# 智能检查并打包所有可打包项目
 - task: PowerShell@2
-  displayName: 'Check and Pack SSP.Entities'
+  displayName: 'Check and Pack NuGet Packages'
   inputs:
     targetType: 'inline'
     script: |
-      $projectPath = "SSP.Entities/SSP.Entities.csproj"
+      # 定义要打包的项目模式
+      $projectPatterns = @(
+        "**/*.Entities.csproj",
+        "**/*.Services.csproj"
+      )
       
-      # 读取当前版本
-      [xml]$csproj = Get-Content $projectPath
-      $currentVersion = $csproj.Project.PropertyGroup.Version
+      $feedUrl = "https://pkgs.dev.azure.com/binet25/_packaging/$(artifactFeed)/nuget/v3/index.json"
+      $outputDir = "$(Build.ArtifactStagingDirectory)/packages"
+      $hasNewPackages = $false
       
-      if ([string]::IsNullOrEmpty($currentVersion)) {
-        $currentVersion = "1.0.0"
+      # 创建输出目录
+      if (-not (Test-Path $outputDir)) {
+        New-Item -ItemType Directory -Path $outputDir | Out-Null
       }
       
-      Write-Host "Current SSP.Entities version: $currentVersion"
+      Write-Host "=== Scanning for packable projects ==="
       
-      # 检查 feed 中是否已存在此版本
-      $feedCheck = dotnet nuget list source
-      Write-Host "Feed sources: $feedCheck"
-      
-      # 打包项目
-      Write-Host "Packing SSP.Entities..."
-      dotnet pack $projectPath --configuration $(buildConfiguration) --no-build --output $(Build.ArtifactStagingDirectory)/packages
-      
-      Write-Host "##vso[task.setvariable variable=EntitiesVersion]$currentVersion"
-      Write-Host "##vso[task.setvariable variable=PackEntities]true"
-
-# 检查 SSP.Services 的版本变动并打包
-- task: PowerShell@2
-  displayName: 'Check and Pack SSP.Services'
-  inputs:
-    targetType: 'inline'
-    script: |
-      $projectPath = "SSP.Services/SSP.Services.csproj"
-      
-      # 读取当前版本
-      [xml]$csproj = Get-Content $projectPath
-      $currentVersion = $csproj.Project.PropertyGroup.Version
-      
-      if ([string]::IsNullOrEmpty($currentVersion)) {
-        $currentVersion = "1.0.0"
+      # 查找所有匹配的项目
+      $allProjects = @()
+      foreach ($pattern in $projectPatterns) {
+        $foundProjects = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter ($pattern -replace '\*\*/', '') -Recurse -ErrorAction SilentlyContinue
+        $allProjects += $foundProjects
       }
       
-      Write-Host "Current SSP.Services version: $currentVersion"
+      if ($allProjects.Count -eq 0) {
+        Write-Host "##[warning]No packable projects found matching the patterns"
+        Write-Host "##vso[task.setvariable variable=HasNewPackages]false"
+        exit 0
+      }
       
-      # 打包项目
-      Write-Host "Packing SSP.Services..."
-      dotnet pack $projectPath --configuration $(buildConfiguration) --no-build --output $(Build.ArtifactStagingDirectory)/packages
+      Write-Host "Found $($allProjects.Count) project(s) to process"
       
-      Write-Host "##vso[task.setvariable variable=ServicesVersion]$currentVersion"
-      Write-Host "##vso[task.setvariable variable=PackServices]true"
+      # 处理每个项目
+      foreach ($project in $allProjects) {
+        Write-Host ""
+        Write-Host "=== Processing: $($project.Name) ==="
+        
+        # 读取项目版本
+        [xml]$csproj = Get-Content $project.FullName
+        $currentVersion = $csproj.Project.PropertyGroup.Version
+        
+        if ([string]::IsNullOrEmpty($currentVersion)) {
+          $currentVersion = "1.0.0"
+          Write-Host "##[warning]No version specified, using default: $currentVersion"
+        }
+        
+        # 提取包名（移除 .csproj 扩展名）
+        $packageName = $project.BaseName
+        Write-Host "Package: $packageName"
+        Write-Host "Version: $currentVersion"
+        
+        # 检查版本是否已存在
+        Write-Host "Checking if version exists in feed..."
+        $versionExists = $false
+        
+        try {
+          # 使用 dotnet nuget 命令搜索包
+          $searchCmd = "dotnet nuget list source $(artifactFeed) $packageName --format json"
+          $searchResult = Invoke-Expression $searchCmd 2>&1 | Out-String
+          
+          # 检查是否包含当前版本
+          if ($searchResult -match "$packageName\s+$currentVersion") {
+            $versionExists = $true
+          }
+        } catch {
+          Write-Host "##[warning]Could not search feed (this is OK for first-time packages)"
+        }
+        
+        if ($versionExists) {
+          Write-Host "##[warning]Version $currentVersion already exists in feed - SKIPPING"
+        } else {
+          Write-Host "##[section]Version $currentVersion is NEW - PACKING"
+          
+          # 打包项目
+          $packResult = dotnet pack $project.FullName `
+            --configuration $(buildConfiguration) `
+            --no-build `
+            --output $outputDir `
+            /p:Version=$currentVersion
+          
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "✓ Successfully packed $packageName $currentVersion"
+            $hasNewPackages = $true
+          } else {
+            Write-Host "##[error]Failed to pack $packageName"
+          }
+        }
+      }
+      
+      # 设置变量供后续步骤使用
+      Write-Host ""
+      Write-Host "=== Summary ==="
+      if ($hasNewPackages) {
+        Write-Host "##[section]New packages are ready to push"
+        Write-Host "##vso[task.setvariable variable=HasNewPackages]true"
+      } else {
+        Write-Host "##[warning]No new packages to push"
+        Write-Host "##vso[task.setvariable variable=HasNewPackages]false"
+      }
 
 # 推送 NuGet 包到 Azure Artifacts
-- task: NuGetCommand@2
-  displayName: 'Push NuGet packages to Azure Artifacts'
-  condition: or(eq(variables['PackEntities'], 'true'), eq(variables['PackServices'], 'true'))
+- task: PowerShell@2
+  displayName: 'Push NuGet Packages to Azure Artifacts'
+  condition: eq(variables['HasNewPackages'], 'true')
   inputs:
-    command: 'push'
-    packagesToPush: '$(Build.ArtifactStagingDirectory)/packages/*.nupkg'
-    nuGetFeedType: 'internal'
-    publishVstsFeed: '$(artifactFeed)'
-    allowPackageConflicts: false
+    targetType: 'inline'
+    script: |
+      $feedUrl = "https://pkgs.dev.azure.com/binet25/_packaging/$(artifactFeed)/nuget/v3/index.json"
+      $packagesDir = "$(Build.ArtifactStagingDirectory)/packages"
+      
+      $packages = Get-ChildItem "$packagesDir/*.nupkg" -ErrorAction SilentlyContinue
+      
+      if ($packages.Count -eq 0) {
+        Write-Host "##[warning]No packages found to push"
+        exit 0
+      }
+      
+      Write-Host "=== Pushing $($packages.Count) package(s) ==="
+      
+      $pushErrors = 0
+      foreach ($package in $packages) {
+        Write-Host ""
+        Write-Host "Pushing: $($package.Name)"
+        
+        try {
+          dotnet nuget push $package.FullName `
+            --source $feedUrl `
+            --api-key az `
+            --skip-duplicate `
+            --no-symbols
+          
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "##[section]✓ Successfully pushed $($package.Name)"
+          } else {
+            Write-Host "##[error]✗ Failed to push $($package.Name)"
+            $pushErrors++
+          }
+        } catch {
+          Write-Host "##[error]Exception while pushing $($package.Name): $_"
+          $pushErrors++
+        }
+      }
+      
+      Write-Host ""
+      Write-Host "=== Push Summary ==="
+      Write-Host "Total packages: $($packages.Count)"
+      Write-Host "Successful: $($packages.Count - $pushErrors)"
+      Write-Host "Failed: $pushErrors"
+      
+      if ($pushErrors -gt 0) {
+        Write-Host "##[error]Some packages failed to push"
+        exit 1
+      }
 
 - task: DotNetCoreCLI@2
   displayName: 'Publish'
@@ -122,7 +213,7 @@ steps:
 
 - task: PublishBuildArtifacts@1
   displayName: 'Publish NuGet Packages'
-  condition: or(eq(variables['PackEntities'], 'true'), eq(variables['PackServices'], 'true'))
+  condition: eq(variables['HasNewPackages'], 'true')
   inputs:
     pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
     artifactName: 'nuget-packages'
