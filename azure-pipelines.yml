@@ -176,18 +176,28 @@ steps:
     artifactName: 'nuget-packages'
 
 - task: PowerShell@2
-  displayName: 'Deploy to IIS'
+  displayName: 'Extract Artifacts and Deploy to IIS'
   inputs:
     targetType: 'inline'
     script: |
-      $sourcePath = "$(Build.ArtifactStagingDirectory)/publish/*"  # Publish directory
-      $destPath = "C:\inetpub\wwwroot\project1"  # IIS path
+      $zipFilePath = "$(Build.ArtifactStagingDirectory)/publish/drop.zip"  # Path to the zipped artifact
+      $extractPath = "$(Build.ArtifactStagingDirectory)/publish"  # Path to extract
+      $destPath = "C:\inetpub\wwwroot\project1"  # IIS directory
 
-      # Check if destination directory exists, and create it if not
+      # Create extraction directory if it doesn't exist
+      if (-Not (Test-Path $extractPath)) {
+        New-Item -ItemType Directory -Path $extractPath -Force
+      }
+
+      # Extract the ZIP file
+      Write-Host "Extracting $zipFilePath to $extractPath"
+      Expand-Archive -Path $zipFilePath -DestinationPath $extractPath -Force
+
+      # Ensure destination directory exists
       if (-Not (Test-Path $destPath)) {
         New-Item -ItemType Directory -Path $destPath -Force
       }
 
-      # Copy files from the publish directory to the IIS directory
-      Copy-Item -Path $sourcePath -Destination $destPath -Recurse -Force
+      # Copy files from the extraction directory to the IIS directory
+      Copy-Item -Path "$extractPath/*" -Destination $destPath -Recurse -Force
       Write-Host "Successfully deployed to $destPath"
