@@ -231,6 +231,14 @@ steps:
         Write-Host "Nested extraction complete"
       }
       
+      # 如果只有一个文件夹，进入该文件夹进行复制（避免多一层目录）
+      $extractedItems = Get-ChildItem -Path $tempExtractPath
+      if ($extractedItems.Count -eq 1 -and $extractedItems[0].PSIsContainer) {
+        Write-Host "##[warning]Found single folder: $($extractedItems[0].Name), copying from inside it..."
+        $tempExtractPath = $extractedItems[0].FullName
+        Write-Host "New source path: $tempExtractPath"
+      }
+      
       # 确保目标目录存在
       if (-not (Test-Path $iisPath)) {
         Write-Host "Creating target directory: $iisPath"
@@ -245,6 +253,17 @@ steps:
         Start-Sleep -Seconds 2
       } catch {
         Write-Host "##[warning]Could not stop application pool (it may not exist or already stopped)"
+      }
+      
+      # 显示最终将要复制的文件
+      Write-Host "Files to be deployed:"
+      $filesToDeploy = Get-ChildItem -Path $tempExtractPath | Select-Object -First 10
+      foreach ($file in $filesToDeploy) {
+        $fileType = if ($file.PSIsContainer) { 'Directory' } else { 'File' }
+        Write-Host "  - $($file.Name) [$fileType]"
+      }
+      if ((Get-ChildItem -Path $tempExtractPath).Count -gt 10) {
+        Write-Host "  ... and more"
       }
       
       # 复制文件到 IIS 目录（覆盖现有文件）
