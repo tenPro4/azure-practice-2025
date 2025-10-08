@@ -174,3 +174,20 @@ steps:
   inputs:
     pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
     artifactName: 'nuget-packages'
+
+- task: PowerShell@2
+  displayName: 'Deploy to IIS'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $sourcePath = "$(Build.ArtifactStagingDirectory)/publish/*"  # Publish directory
+      $destPath = "C:\inetpub\wwwroot\project1"  # IIS path
+
+      # Check if destination directory exists, and create it if not
+      if (-Not (Test-Path $destPath)) {
+        New-Item -ItemType Directory -Path $destPath -Force
+      }
+
+      # Copy files from the publish directory to the IIS directory
+      Copy-Item -Path $sourcePath -Destination $destPath -Recurse -Force
+      Write-Host "Successfully deployed to $destPath"
