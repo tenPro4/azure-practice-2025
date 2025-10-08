@@ -175,35 +175,73 @@ steps:
     pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
     artifactName: 'nuget-packages'
 
+# 打包发布文件为 zip
+- task: ArchiveFiles@2
+  displayName: 'Archive Published Files'
+  inputs:
+    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/publish'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/package.zip'
+    replaceExistingArchive: true
+
+# 部署到 IIS
 - task: PowerShell@2
-  displayName: 'Extract Artifacts and Deploy to IIS'
+  displayName: 'Deploy to IIS'
   inputs:
     targetType: 'inline'
     script: |
-      $zipFilePath = "$(Pipeline.Workspace)/drop/SPP.zip"  # Path to the zipped artifact
-      $extractPath = "$(Build.ArtifactStagingDirectory)/publish"  # Path to extract
-      $destPath = "C:\inetpub\wwwroot\project1"  # IIS directory
-
-      # Check if ZIP file exists
-      if (-Not (Test-Path $zipFilePath)) {
-          Write-Host "##[error]The ZIP file does not exist at $zipFilePath"
-          exit 1
+      $zipFile = "$(Build.ArtifactStagingDirectory)/package.zip"
+      $iisPath = "C:\inetpub\wwwroot\project1"
+      $tempExtractPath = "$(Build.ArtifactStagingDirectory)/extracted"
+      
+      Write-Host "=== Starting IIS Deployment ==="
+      Write-Host "Source: $zipFile"
+      Write-Host "Target: $iisPath"
+      
+      # 创建临时解压目录
+      if (Test-Path $tempExtractPath) {
+        Remove-Item -Path $tempExtractPath -Recurse -Force
       }
-
-      # Create extraction directory if it doesn't exist
-      if (-Not (Test-Path $extractPath)) {
-          New-Item -ItemType Directory -Path $extractPath -Force
+      New-Item -ItemType Directory -Path $tempExtractPath | Out-Null
+      
+      # 解压文件
+      Write-Host "Extracting files..."
+      Expand-Archive -Path $zipFile -DestinationPath $tempExtractPath -Force
+      
+      # 确保目标目录存在
+      if (-not (Test-Path $iisPath)) {
+        Write-Host "Creating target directory: $iisPath"
+        New-Item -ItemType Directory -Path $iisPath -Force | Out-Null
       }
-
-      # Extract the ZIP file
-      Write-Host "Extracting $zipFilePath to $extractPath"
-      Expand-Archive -Path $zipFilePath -DestinationPath $extractPath -Force
-
-      # Ensure destination directory exists
-      if (-Not (Test-Path $destPath)) {
-          New-Item -ItemType Directory -Path $destPath -Force
+      
+      # 停止应用池（可选，取决于你的应用池名称）
+      try {
+        $appPoolName = "project1"  # 根据实际情况修改应用池名称
+        Write-Host "Stopping application pool: $appPoolName"
+        Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+      } catch {
+        Write-Host "##[warning]Could not stop application pool (it may not exist or already stopped)"
       }
-
-      # Copy files from the extraction directory to the IIS directory
-      Copy-Item -Path "$extractPath/*" -Destination $destPath -Recurse -Force
-      Write-Host "Successfully deployed to $destPath"
+      
+      # 复制文件到 IIS 目录（覆盖现有文件）
+      Write-Host "Copying files to IIS directory..."
+      Copy-Item -Path "$tempExtractPath\*" -Destination $iisPath -Recurse -Force
+      
+      Write-Host "✓ Files deployed successfully"
+      
+      # 启动应用池
+      try {
+        Write-Host "Starting application pool: $appPoolName"
+        Start-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+        Write-Host "✓ Application pool started"
+      } catch {
+        Write-Host "##[warning]Could not start application pool"
+      }
+      
+      # 清理临时文件
+      Write-Host "Cleaning up temporary files..."
+      Remove-Item -Path $tempExtractPath -Recurse -Force
+      
+      Write-Host "=== Deployment Complete ==="
