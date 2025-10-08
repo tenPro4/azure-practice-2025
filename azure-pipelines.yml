@@ -164,28 +164,23 @@ steps:
     publishWebProjects: false
     zipAfterPublish: false
 
-- task: PublishBuildArtifacts@1
-  displayName: 'Publish Build Artifacts'
-  inputs:
-    pathToPublish: '$(Build.ArtifactStagingDirectory)/publish'
-    artifactName: 'drop'
-
-- task: PublishBuildArtifacts@1
-  displayName: 'Publish NuGet Packages'
-  condition: eq(variables['HasNewPackages'], 'true')
-  inputs:
-    pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
-    artifactName: 'nuget-packages'
-
-# 打包发布文件为 zip
+# 打包发布文件用于部署
 - task: ArchiveFiles@2
-  displayName: 'Archive Published Files'
+  displayName: 'Archive for Deployment'
   inputs:
     rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/publish'
     includeRootFolder: false
     archiveType: 'zip'
     archiveFile: '$(Build.ArtifactStagingDirectory)/package.zip'
     replaceExistingArchive: true
+
+# 发布 NuGet 包到 Artifacts（仅在有新包时）
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish NuGet Packages Artifact'
+  condition: eq(variables['HasNewPackages'], 'true')
+  inputs:
+    pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
+    artifactName: 'nuget-packages'
 
 # 部署到 IIS
 - task: PowerShell@2
