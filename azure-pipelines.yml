@@ -213,9 +213,18 @@ steps:
       }
 
       # 停止 App Pool
-      Write-Host "Stopping App Pool: $appPoolName"
-      Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
-      Start-Sleep -Seconds 5
+      try {
+          $appPool = Get-WebAppPoolState -Name $appPoolName -ErrorAction SilentlyContinue
+          if ($appPool.Value -eq "Started") {
+              Write-Host "Stopping App Pool: $appPoolName"
+              Stop-WebAppPool -Name $appPoolName -ErrorAction Stop
+              Start-Sleep -Seconds 3
+          } else {
+              Write-Host "App Pool '$appPoolName' is already stopped. Skipping..."
+          }
+      } catch {
+          Write-Host "##[warning]Could not stop App Pool '$appPoolName' — it may not exist."
+      }
 
       # 部署文件
       Write-Host "Deploying files to: $iisPath"
