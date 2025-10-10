@@ -1,5 +1,6 @@
 trigger:
 - main
+- develop
 
 pool:
   name: 'binet-window-agent'
@@ -12,6 +13,15 @@ variables:
   packableProjects: |
     **/*.Entities.csproj
     **/*.Services.csproj
+  # 根据分支设置部署路径和环境
+  ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+    iisDeployPath: 'Prod/project1'
+    aspnetEnvironment: 'Production'
+    deployEnvironment: 'Production'
+  ${{ if eq(variables['Build.SourceBranchName'], 'develop') }}:
+    iisDeployPath: 'Projects/project1'
+    aspnetEnvironment: 'Development'
+    deployEnvironment: 'Development'
 
 stages:
 # ============================================
@@ -212,7 +222,7 @@ stages:
   jobs:
   - deployment: DeployToIIS
     displayName: 'Deploy to IIS Server'
-    environment: 'Production'  # 可以在 Azure DevOps 中创建环境进行审批控制
+    environment: $(deployEnvironment)
     strategy:
       runOnce:
         deploy:
@@ -222,17 +232,22 @@ stages:
             displayName: 'Download Deployment Package'
 
           - task: PowerShell@2
-            displayName: "Deploy to IIS (auto-detect)"
+            displayName: "Deploy to IIS (Branch: $(Build.SourceBranchName))"
             inputs:
               targetType: 'inline'
               script: |
                 Import-Module WebAdministration
 
-                $sitePath = "Projects/project1"   # 👉 只需改这里
+                $sitePath = "$(iisDeployPath)"
                 $zipFile = "$(Pipeline.Workspace)/deployment-package/package.zip"
+                $aspnetEnv = "$(aspnetEnvironment)"
                 $tempExtractPath = "$(Agent.TempDirectory)/extracted"
 
-                Write-Host "=== Starting IIS Deployment to '$sitePath' ==="
+                Write-Host "=== Starting IIS Deployment ==="
+                Write-Host "Branch: $(Build.SourceBranchName)"
+                Write-Host "Environment: $aspnetEnv"
+                Write-Host "IIS Site Path: $sitePath"
+                
                 $site = Get-Item "IIS:\Sites\$sitePath"
 
                 if (-not $site) {
@@ -276,6 +291,17 @@ stages:
                 Write-Host "Deploying files to: $iisPath"
                 Copy-Item "$tempExtractPath\*" $iisPath -Recurse -Force
 
+                # 设置 ASPNETCORE_ENVIRONMENT 环境变量到 App Pool
+                Write-Host "Setting ASPNETCORE_ENVIRONMENT to: $aspnetEnv"
+                try {
+                    Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "processModel.environmentVariables" -Value @{ASPNETCORE_ENVIRONMENT=$aspnetEnv}
+                    Write-Host "✓ Environment variable set successfully"
+                } catch {
+                    Write-Host "##[warning]Could not set environment variable: $_"
+                }
+
                 # 启动 App Pool
                 Start-WebAppPool -Name $appPoolName
-                Write-Host "✓ Deployment completed successfully to $sitePath"
+                Write-Host "✓ Deployment completed successfully"
+                Write-Host "  - Site: $sitePath"
+                Write-Host "  - Environment: $aspnetEnv"
