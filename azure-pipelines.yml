@@ -13,223 +13,269 @@ variables:
     **/*.Entities.csproj
     **/*.Services.csproj
 
-steps:
-- task: DotNetCoreCLI@2
-  displayName: 'Restore packages'
-  inputs:
-    command: 'restore'
-    projects: '**/*.csproj'
+stages:
+# ============================================
+# Stage 1: 构建和测试
+# ============================================
+- stage: Build
+  displayName: 'Build and Test'
+  jobs:
+  - job: BuildAndTest
+    displayName: 'Build and Run Tests'
+    steps:
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore packages'
+      inputs:
+        command: 'restore'
+        projects: '**/*.csproj'
 
-- task: DotNetCoreCLI@2
-  displayName: 'Build'
-  inputs:
-    command: 'build'
-    projects: '**/*.csproj'
-    arguments: '--configuration $(buildConfiguration) --no-restore'
+    - task: DotNetCoreCLI@2
+      displayName: 'Build'
+      inputs:
+        command: 'build'
+        projects: '**/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-restore'
 
-# 运行单元测试
-- task: DotNetCoreCLI@2
-  displayName: 'Run Unit Tests'
-  inputs:
-    command: 'test'
-    projects: '**/*.UnitTest.csproj'
-    arguments: '--configuration $(buildConfiguration) --no-build'
-    publishTestResults: true
+    - task: DotNetCoreCLI@2
+      displayName: 'Run Unit Tests'
+      inputs:
+        command: 'test'
+        projects: '**/*.UnitTest.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-build'
+        publishTestResults: true
 
-- task: PowerShell@2
-  displayName: 'Check and Pack NuGet Packages'
-  inputs:
-    targetType: 'inline'
-    script: |
-      # 定义要打包的项目模式
-      $projectPatterns = "$(packableProjects)" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-      
-      $feedUrl = "https://pkgs.dev.azure.com/binet25/_packaging/$(artifactFeed)/nuget/v3/index.json"
-      $outputDir = "$(Build.ArtifactStagingDirectory)/packages"
-      $hasNewPackages = $false
-      
-      if (-not (Test-Path $outputDir)) {
-        New-Item -ItemType Directory -Path $outputDir | Out-Null
-      }
-      
-      Write-Host "=== Scanning for packable projects ==="
-      
-      $allProjects = @()
-      foreach ($pattern in $projectPatterns) {
-        $foundProjects = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter ($pattern -replace '\*\*/', '') -Recurse -ErrorAction SilentlyContinue
-        $allProjects += $foundProjects
-      }
-      
-      if ($allProjects.Count -eq 0) {
-        Write-Host "##[warning]No packable projects found matching the patterns"
-        Write-Host "##vso[task.setvariable variable=HasNewPackages]false"
-        exit 0
-      }
-      
-      Write-Host "Found $($allProjects.Count) project(s) to process"
-      
-      # 处理每个项目
-      foreach ($project in $allProjects) {
-        Write-Host ""
-        Write-Host "=== Processing: $($project.Name) ==="
-        
-        # 读取项目版本
-        [xml]$csproj = Get-Content $project.FullName
-        $currentVersion = $csproj.Project.PropertyGroup.Version
-        
-        if ([string]::IsNullOrEmpty($currentVersion)) {
-          $currentVersion = "1.0.0"
-          Write-Host "##[warning]No version specified, using default: $currentVersion"
-        }
-        
-        # 提取包名（移除 .csproj 扩展名）
-        $packageName = $project.BaseName
-        Write-Host "Package: $packageName"
-        Write-Host "Version: $currentVersion"
-        
-        # 检查版本是否已存在
-        Write-Host "Checking if version exists in feed..."
-        $versionExists = $false
-        
-        try {
-          # 使用 dotnet nuget 命令搜索包
-          $searchCmd = "dotnet nuget list source $(artifactFeed) $packageName --format json"
-          $searchResult = Invoke-Expression $searchCmd 2>&1 | Out-String
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish API Project'
+      inputs:
+        command: 'publish'
+        projects: '**/*.API.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-build -o $(Build.ArtifactStagingDirectory)/publish'
+        publishWebProjects: false
+        zipAfterPublish: false
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive for Deployment'
+      inputs:
+        rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/publish'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/package.zip'
+        replaceExistingArchive: true
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish Deployment Package'
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/package.zip'
+        artifactName: 'deployment-package'
+
+# ============================================
+# Stage 2: NuGet 打包和发布
+# ============================================
+- stage: Package
+  displayName: 'Package and Push NuGet'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - job: NuGetPackage
+    displayName: 'Create and Push NuGet Packages'
+    steps:
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore packages'
+      inputs:
+        command: 'restore'
+        projects: '**/*.csproj'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Build for Packaging'
+      inputs:
+        command: 'build'
+        projects: '**/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-restore'
+
+    - task: PowerShell@2
+      displayName: 'Check and Pack NuGet Packages'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # 定义要打包的项目模式
+          $projectPatterns = "$(packableProjects)" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
           
-          # 检查是否包含当前版本
-          if ($searchResult -match "$packageName\s+$currentVersion") {
-            $versionExists = $true
+          $feedUrl = "https://pkgs.dev.azure.com/binet25/_packaging/$(artifactFeed)/nuget/v3/index.json"
+          $outputDir = "$(Build.ArtifactStagingDirectory)/packages"
+          $hasNewPackages = $false
+          
+          if (-not (Test-Path $outputDir)) {
+            New-Item -ItemType Directory -Path $outputDir | Out-Null
           }
-        } catch {
-          Write-Host "##[warning]Could not search feed (this is OK for first-time packages)"
-        }
-        
-        if ($versionExists) {
-          Write-Host "##[warning]Version $currentVersion already exists in feed - SKIPPING"
-        } else {
-          Write-Host "##[section]Version $currentVersion is NEW - PACKING"
           
-          # 打包项目
-          $packResult = dotnet pack $project.FullName `
-            --configuration $(buildConfiguration) `
-            --no-build `
-            --output $outputDir `
-            /p:Version=$currentVersion
+          Write-Host "=== Scanning for packable projects ==="
           
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "✓ Successfully packed $packageName $currentVersion"
-            $hasNewPackages = $true
+          $allProjects = @()
+          foreach ($pattern in $projectPatterns) {
+            $foundProjects = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter ($pattern -replace '\*\*/', '') -Recurse -ErrorAction SilentlyContinue
+            $allProjects += $foundProjects
+          }
+          
+          if ($allProjects.Count -eq 0) {
+            Write-Host "##[warning]No packable projects found matching the patterns"
+            Write-Host "##vso[task.setvariable variable=HasNewPackages]false"
+            exit 0
+          }
+          
+          Write-Host "Found $($allProjects.Count) project(s) to process"
+          
+          # 处理每个项目
+          foreach ($project in $allProjects) {
+            Write-Host ""
+            Write-Host "=== Processing: $($project.Name) ==="
+            
+            # 读取项目版本
+            [xml]$csproj = Get-Content $project.FullName
+            $currentVersion = $csproj.Project.PropertyGroup.Version
+            
+            if ([string]::IsNullOrEmpty($currentVersion)) {
+              $currentVersion = "1.0.0"
+              Write-Host "##[warning]No version specified, using default: $currentVersion"
+            }
+            
+            # 提取包名（移除 .csproj 扩展名）
+            $packageName = $project.BaseName
+            Write-Host "Package: $packageName"
+            Write-Host "Version: $currentVersion"
+            
+            # 检查版本是否已存在
+            Write-Host "Checking if version exists in feed..."
+            $versionExists = $false
+            
+            try {
+              # 使用 dotnet nuget 命令搜索包
+              $searchCmd = "dotnet nuget list source $(artifactFeed) $packageName --format json"
+              $searchResult = Invoke-Expression $searchCmd 2>&1 | Out-String
+              
+              # 检查是否包含当前版本
+              if ($searchResult -match "$packageName\s+$currentVersion") {
+                $versionExists = $true
+              }
+            } catch {
+              Write-Host "##[warning]Could not search feed (this is OK for first-time packages)"
+            }
+            
+            if ($versionExists) {
+              Write-Host "##[warning]Version $currentVersion already exists in feed - SKIPPING"
+            } else {
+              Write-Host "##[section]Version $currentVersion is NEW - PACKING"
+              
+              # 打包项目
+              $packResult = dotnet pack $project.FullName `
+                --configuration $(buildConfiguration) `
+                --no-build `
+                --output $outputDir `
+                /p:Version=$currentVersion
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✓ Successfully packed $packageName $currentVersion"
+                $hasNewPackages = $true
+              } else {
+                Write-Host "##[error]Failed to pack $packageName"
+              }
+            }
+          }
+          
+          # 设置变量供后续步骤使用
+          Write-Host ""
+          Write-Host "=== Summary ==="
+          if ($hasNewPackages) {
+            Write-Host "##[section]New packages are ready to push"
+            Write-Host "##vso[task.setvariable variable=HasNewPackages]true"
           } else {
-            Write-Host "##[error]Failed to pack $packageName"
+            Write-Host "##[warning]No new packages to push"
+            Write-Host "##vso[task.setvariable variable=HasNewPackages]false"
           }
-        }
-      }
-      
-      # 设置变量供后续步骤使用
-      Write-Host ""
-      Write-Host "=== Summary ==="
-      if ($hasNewPackages) {
-        Write-Host "##[section]New packages are ready to push"
-        Write-Host "##vso[task.setvariable variable=HasNewPackages]true"
-      } else {
-        Write-Host "##[warning]No new packages to push"
-        Write-Host "##vso[task.setvariable variable=HasNewPackages]false"
-      }
 
-# 推送 NuGet 包到 Azure Artifacts
-- task: NuGetCommand@2
-  displayName: 'Push NuGet Packages to Azure Artifacts'
-  condition: eq(variables['HasNewPackages'], 'true')
-  inputs:
-    command: 'push'
-    packagesToPush: '$(Build.ArtifactStagingDirectory)/packages/*.nupkg'
-    nuGetFeedType: 'internal'
-    publishVstsFeed: '$(artifactFeed)'
-    allowPackageConflicts: true
+    - task: NuGetCommand@2
+      displayName: 'Push NuGet Packages to Azure Artifacts'
+      condition: eq(variables['HasNewPackages'], 'true')
+      inputs:
+        command: 'push'
+        packagesToPush: '$(Build.ArtifactStagingDirectory)/packages/*.nupkg'
+        nuGetFeedType: 'internal'
+        publishVstsFeed: '$(artifactFeed)'
+        allowPackageConflicts: true
 
-- task: DotNetCoreCLI@2
-  displayName: 'Publish API Project'
-  inputs:
-    command: 'publish'
-    projects: '**/*.API.csproj'
-    arguments: '--configuration $(buildConfiguration) --no-build -o $(Build.ArtifactStagingDirectory)/publish'
-    publishWebProjects: false
-    zipAfterPublish: false
+# ============================================
+# Stage 3: 部署到 IIS
+# ============================================
+- stage: Deploy
+  displayName: 'Deploy to IIS'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToIIS
+    displayName: 'Deploy to IIS Server'
+    environment: 'Production'  # 可以在 Azure DevOps 中创建环境进行审批控制
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: deployment-package
+            displayName: 'Download Deployment Package'
 
-# 打包发布文件用于部署
-- task: ArchiveFiles@2
-  displayName: 'Archive for Deployment'
-  inputs:
-    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/publish'
-    includeRootFolder: false
-    archiveType: 'zip'
-    archiveFile: '$(Build.ArtifactStagingDirectory)/package.zip'
-    replaceExistingArchive: true
+          - task: PowerShell@2
+            displayName: "Deploy to IIS (auto-detect)"
+            inputs:
+              targetType: 'inline'
+              script: |
+                Import-Module WebAdministration
 
-# 发布 NuGet 包到 Artifacts（仅在有新包时）
-# - task: PublishBuildArtifacts@1
-#   displayName: 'Publish NuGet Packages Artifact'
-#   condition: eq(variables['HasNewPackages'], 'true')
-#   inputs:
-#     pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
-#     artifactName: 'nuget-packages'
+                $sitePath = "Projects/project1"   # 👉 只需改这里
+                $zipFile = "$(Pipeline.Workspace)/deployment-package/package.zip"
+                $tempExtractPath = "$(Agent.TempDirectory)/extracted"
 
-# 部署到 IIS
-- task: PowerShell@2
-  displayName: "Deploy to IIS (auto-detect)"
-  inputs:
-    targetType: 'inline'
-    script: |
-      Import-Module WebAdministration
+                Write-Host "=== Starting IIS Deployment to '$sitePath' ==="
+                $site = Get-Item "IIS:\Sites\$sitePath"
 
-      $sitePath = "Projects/project1"   # 👉 只需改这里
-      $zipFile = "$(Build.ArtifactStagingDirectory)/package.zip"
-      $tempExtractPath = "$(Build.ArtifactStagingDirectory)/extracted"
+                if (-not $site) {
+                  Write-Host "##[error]Site '$sitePath' not found in IIS."
+                  exit 1
+                }
 
-      Write-Host "=== Starting IIS Deployment to '$sitePath' ==="
-      $site = Get-Item "IIS:\Sites\$sitePath"
+                $iisPath = $site.physicalPath
+                $appPoolName = $site.applicationPool
+                Write-Host "Target Path: $iisPath"
+                Write-Host "App Pool: $appPoolName"
 
-      if (-not $site) {
-        Write-Host "##[error]Site '$sitePath' not found in IIS."
-        exit 1
-      }
+                # 清理旧文件夹
+                if (Test-Path $tempExtractPath) { Remove-Item $tempExtractPath -Recurse -Force }
+                New-Item -ItemType Directory -Path $tempExtractPath | Out-Null
 
-      $iisPath = $site.physicalPath
-      $appPoolName = $site.applicationPool
-      Write-Host "Target Path: $iisPath"
-      Write-Host "App Pool: $appPoolName"
+                # 解压部署包
+                Expand-Archive -Path $zipFile -DestinationPath $tempExtractPath -Force
 
-      # 清理旧文件夹
-      if (Test-Path $tempExtractPath) { Remove-Item $tempExtractPath -Recurse -Force }
-      New-Item -ItemType Directory -Path $tempExtractPath | Out-Null
+                # 若解压后只有一层目录，进入那一层
+                $items = Get-ChildItem $tempExtractPath
+                if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+                  $tempExtractPath = $items[0].FullName
+                }
 
-      # 解压部署包
-      Expand-Archive -Path $zipFile -DestinationPath $tempExtractPath -Force
+                # 停止 App Pool
+                try {
+                    $appPool = Get-WebAppPoolState -Name $appPoolName -ErrorAction SilentlyContinue
+                    if ($appPool.Value -eq "Started") {
+                        Write-Host "Stopping App Pool: $appPoolName"
+                        Stop-WebAppPool -Name $appPoolName -ErrorAction Stop
+                        Start-Sleep -Seconds 3
+                    } else {
+                        Write-Host "App Pool '$appPoolName' is already stopped. Skipping..."
+                    }
+                } catch {
+                    Write-Host "##[warning]Could not stop App Pool '$appPoolName' — it may not exist."
+                }
 
-      # 若解压后只有一层目录，进入那一层
-      $items = Get-ChildItem $tempExtractPath
-      if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
-        $tempExtractPath = $items[0].FullName
-      }
+                # 部署文件
+                Write-Host "Deploying files to: $iisPath"
+                Copy-Item "$tempExtractPath\*" $iisPath -Recurse -Force
 
-      # 停止 App Pool
-      try {
-          $appPool = Get-WebAppPoolState -Name $appPoolName -ErrorAction SilentlyContinue
-          if ($appPool.Value -eq "Started") {
-              Write-Host "Stopping App Pool: $appPoolName"
-              Stop-WebAppPool -Name $appPoolName -ErrorAction Stop
-              Start-Sleep -Seconds 3
-          } else {
-              Write-Host "App Pool '$appPoolName' is already stopped. Skipping..."
-          }
-      } catch {
-          Write-Host "##[warning]Could not stop App Pool '$appPoolName' — it may not exist."
-      }
-
-      # 部署文件
-      Write-Host "Deploying files to: $iisPath"
-      Copy-Item "$tempExtractPath\*" $iisPath -Recurse -Force
-
-      # 启动 App Pool
-      Start-WebAppPool -Name $appPoolName
-      Write-Host "✓ Deployment completed successfully to $sitePath"
+                # 启动 App Pool
+                Start-WebAppPool -Name $appPoolName
+                Write-Host "✓ Deployment completed successfully to $sitePath"
