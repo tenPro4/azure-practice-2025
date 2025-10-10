@@ -27,6 +27,7 @@ namespace SPP.Controllers
         [HttpGet, Route("[action]")]
         public IActionResult Settings()
         {
+            // comments
             return Ok(_settings);
         }
     }
