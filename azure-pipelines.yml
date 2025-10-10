@@ -215,7 +215,7 @@ steps:
       # 停止 App Pool
       Write-Host "Stopping App Pool: $appPoolName"
       Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
-      Start-Sleep -Seconds 1
+      Start-Sleep -Seconds 5
 
       # 部署文件
       Write-Host "Deploying files to: $iisPath"
