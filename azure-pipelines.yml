@@ -8,9 +8,7 @@ variables:
   solution: '**/*.sln'
   buildPlatform: 'Any CPU'
   buildConfiguration: 'Release'
-  # 设置你的 Azure Artifacts feed 名称
   artifactFeed: 'binet25'
-  # 定义需要打包的项目模式（支持通配符）
   packableProjects: |
     **/*.Entities.csproj
     **/*.Services.csproj
@@ -38,30 +36,24 @@ steps:
     arguments: '--configuration $(buildConfiguration) --no-build'
     publishTestResults: true
 
-# 智能检查并打包所有可打包项目
 - task: PowerShell@2
   displayName: 'Check and Pack NuGet Packages'
   inputs:
     targetType: 'inline'
     script: |
       # 定义要打包的项目模式
-      $projectPatterns = @(
-        "**/*.Entities.csproj",
-        "**/*.Services.csproj"
-      )
+      $projectPatterns = "$(packableProjects)" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
       
       $feedUrl = "https://pkgs.dev.azure.com/binet25/_packaging/$(artifactFeed)/nuget/v3/index.json"
       $outputDir = "$(Build.ArtifactStagingDirectory)/packages"
       $hasNewPackages = $false
       
-      # 创建输出目录
       if (-not (Test-Path $outputDir)) {
         New-Item -ItemType Directory -Path $outputDir | Out-Null
       }
       
       Write-Host "=== Scanning for packable projects ==="
       
-      # 查找所有匹配的项目
       $allProjects = @()
       foreach ($pattern in $projectPatterns) {
         $foundProjects = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Filter ($pattern -replace '\*\*/', '') -Recurse -ErrorAction SilentlyContinue
@@ -175,109 +167,60 @@ steps:
     replaceExistingArchive: true
 
 # 发布 NuGet 包到 Artifacts（仅在有新包时）
-- task: PublishBuildArtifacts@1
-  displayName: 'Publish NuGet Packages Artifact'
-  condition: eq(variables['HasNewPackages'], 'true')
-  inputs:
-    pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
-    artifactName: 'nuget-packages'
+# - task: PublishBuildArtifacts@1
+#   displayName: 'Publish NuGet Packages Artifact'
+#   condition: eq(variables['HasNewPackages'], 'true')
+#   inputs:
+#     pathToPublish: '$(Build.ArtifactStagingDirectory)/packages'
+#     artifactName: 'nuget-packages'
 
 # 部署到 IIS
 - task: PowerShell@2
-  displayName: 'Deploy to IIS'
+  displayName: "Deploy to IIS (auto-detect)"
   inputs:
     targetType: 'inline'
     script: |
+      Import-Module WebAdministration
+
+      $sitePath = "Projects/project1"   # 👉 只需改这里
       $zipFile = "$(Build.ArtifactStagingDirectory)/package.zip"
-      $iisPath = "C:\inetpub\wwwroot\project1"
       $tempExtractPath = "$(Build.ArtifactStagingDirectory)/extracted"
-      
-      Write-Host "=== Starting IIS Deployment ==="
-      Write-Host "Source: $zipFile"
-      Write-Host "Target: $iisPath"
-      
-      # 创建临时解压目录
-      if (Test-Path $tempExtractPath) {
-        Remove-Item -Path $tempExtractPath -Recurse -Force
+
+      Write-Host "=== Starting IIS Deployment to '$sitePath' ==="
+      $site = Get-Item "IIS:\Sites\$sitePath"
+
+      if (-not $site) {
+        Write-Host "##[error]Site '$sitePath' not found in IIS."
+        exit 1
       }
+
+      $iisPath = $site.physicalPath
+      $appPoolName = $site.applicationPool
+      Write-Host "Target Path: $iisPath"
+      Write-Host "App Pool: $appPoolName"
+
+      # 清理旧文件夹
+      if (Test-Path $tempExtractPath) { Remove-Item $tempExtractPath -Recurse -Force }
       New-Item -ItemType Directory -Path $tempExtractPath | Out-Null
-      
-      # 解压文件
-      Write-Host "Extracting files..."
+
+      # 解压部署包
       Expand-Archive -Path $zipFile -DestinationPath $tempExtractPath -Force
-      
-      # 检查解压后的文件结构
-      Write-Host "Checking extracted files..."
-      $extractedItems = Get-ChildItem -Path $tempExtractPath
-      Write-Host "Extracted items count: $($extractedItems.Count)"
-      foreach ($item in $extractedItems) {
-        $itemType = if ($item.PSIsContainer) { 'Directory' } else { 'File' }
-        Write-Host "  - $($item.Name) [$itemType]"
+
+      # 若解压后只有一层目录，进入那一层
+      $items = Get-ChildItem $tempExtractPath
+      if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+        $tempExtractPath = $items[0].FullName
       }
-      
-      # 如果只有一个 zip 文件，可能是嵌套打包，需要再次解压
-      if ($extractedItems.Count -eq 1 -and $extractedItems[0].Extension -eq '.zip') {
-        Write-Host "##[warning]Found nested zip file, extracting again..."
-        $nestedZip = $extractedItems[0].FullName
-        $tempExtractPath2 = "$tempExtractPath\extracted"
-        Expand-Archive -Path $nestedZip -DestinationPath $tempExtractPath2 -Force
-        Remove-Item -Path $nestedZip -Force
-        $tempExtractPath = $tempExtractPath2
-        Write-Host "Nested extraction complete"
-      }
-      
-      # 如果只有一个文件夹，进入该文件夹进行复制（避免多一层目录）
-      $extractedItems = Get-ChildItem -Path $tempExtractPath
-      if ($extractedItems.Count -eq 1 -and $extractedItems[0].PSIsContainer) {
-        Write-Host "##[warning]Found single folder: $($extractedItems[0].Name), copying from inside it..."
-        $tempExtractPath = $extractedItems[0].FullName
-        Write-Host "New source path: $tempExtractPath"
-      }
-      
-      # 确保目标目录存在
-      if (-not (Test-Path $iisPath)) {
-        Write-Host "Creating target directory: $iisPath"
-        New-Item -ItemType Directory -Path $iisPath -Force | Out-Null
-      }
-      
-      # 停止应用池（可选，取决于你的应用池名称）
-      try {
-        $appPoolName = "project1"  # 根据实际情况修改应用池名称
-        Write-Host "Stopping application pool: $appPoolName"
-        Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-      } catch {
-        Write-Host "##[warning]Could not stop application pool (it may not exist or already stopped)"
-      }
-      
-      # 显示最终将要复制的文件
-      Write-Host "Files to be deployed:"
-      $filesToDeploy = Get-ChildItem -Path $tempExtractPath | Select-Object -First 10
-      foreach ($file in $filesToDeploy) {
-        $fileType = if ($file.PSIsContainer) { 'Directory' } else { 'File' }
-        Write-Host "  - $($file.Name) [$fileType]"
-      }
-      if ((Get-ChildItem -Path $tempExtractPath).Count -gt 10) {
-        Write-Host "  ... and more"
-      }
-      
-      # 复制文件到 IIS 目录（覆盖现有文件）
-      Write-Host "Copying files to IIS directory..."
-      Copy-Item -Path "$tempExtractPath\*" -Destination $iisPath -Recurse -Force
-      
-      Write-Host "✓ Files deployed successfully"
-      
-      # 启动应用池
-      try {
-        Write-Host "Starting application pool: $appPoolName"
-        Start-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
-        Write-Host "✓ Application pool started"
-      } catch {
-        Write-Host "##[warning]Could not start application pool"
-      }
-      
-      # 清理临时文件
-      Write-Host "Cleaning up temporary files..."
-      Remove-Item -Path $tempExtractPath -Recurse -Force
-      
-      Write-Host "=== Deployment Complete ==="
+
+      # 停止 App Pool
+      Write-Host "Stopping App Pool: $appPoolName"
+      Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+      Start-Sleep -Seconds 1
+
+      # 部署文件
+      Write-Host "Deploying files to: $iisPath"
+      Copy-Item "$tempExtractPath\*" $iisPath -Recurse -Force
+
+      # 启动 App Pool
+      Start-WebAppPool -Name $appPoolName
+      Write-Host "✓ Deployment completed successfully to $sitePath"
