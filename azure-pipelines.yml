@@ -16,13 +16,13 @@ variables:
 
 stages:
 # ============================================
-# Stage 1: 构建和测试
+# Stage 1: 构建
 # ============================================
 - stage: Build
-  displayName: 'Build and Test'
+  displayName: 'Build Solution'
   jobs:
-  - job: BuildAndTest
-    displayName: 'Build and Run Tests'
+  - job: BuildJob
+    displayName: 'Build Projects'
     steps:
     - task: DotNetCoreCLI@2
       displayName: 'Restore packages'
@@ -36,14 +36,6 @@ stages:
         command: 'build'
         projects: '**/*.csproj'
         arguments: '--configuration $(buildConfiguration) --no-restore'
-
-    - task: DotNetCoreCLI@2
-      displayName: 'Run Unit Tests'
-      inputs:
-        command: 'test'
-        projects: '**/*.UnitTest.csproj'
-        arguments: '--configuration $(buildConfiguration) --no-build'
-        publishTestResults: true
 
     - task: DotNetCoreCLI@2
       displayName: 'Publish API Project'
@@ -69,12 +61,50 @@ stages:
         targetPath: '$(Build.ArtifactStagingDirectory)/package.zip'
         artifactName: 'deployment-package'
 
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish Build Output for Testing'
+      inputs:
+        targetPath: '$(Build.SourcesDirectory)'
+        artifactName: 'build-output'
+
 # ============================================
-# Stage 2: NuGet 打包和发布
+# Stage 2: 测试
+# ============================================
+- stage: Test
+  displayName: 'Run Tests'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - job: UnitTest
+    displayName: 'Run Unit Tests'
+    steps:
+    - download: current
+      artifact: build-output
+      displayName: 'Download Build Output'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Run Unit Tests'
+      inputs:
+        command: 'test'
+        projects: '$(Pipeline.Workspace)/build-output/**/*.UnitTest.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-build --logger trx --collect:"XPlat Code Coverage"'
+        publishTestResults: true
+
+    - task: PublishCodeCoverageResults@2
+      displayName: 'Publish Code Coverage'
+      condition: succeededOrFailed()
+      inputs:
+        summaryFileLocation: '$(Agent.TempDirectory)/**/coverage.cobertura.xml'
+        codeCoverageTool: 'Cobertura'
+
+# ============================================
+# Stage 3: NuGet 打包和发布
 # ============================================
 - stage: Package
   displayName: 'Package and Push NuGet'
-  dependsOn: Build
+  dependsOn: 
+  - Build
+  - Test
   condition: succeeded()
   jobs:
   - job: NuGetPackage
@@ -204,11 +234,13 @@ stages:
         allowPackageConflicts: true
 
 # ============================================
-# Stage 3: 部署到开发环境
+# Stage 4: 部署到开发环境
 # ============================================
 - stage: Deploy_Dev
   displayName: 'Deploy to Development IIS'
-  dependsOn: Build
+  dependsOn: 
+  - Build
+  - Test
   condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'develop'))
   variables:
     iisDeployPath: 'Projects/project1'
@@ -289,10 +321,24 @@ stages:
                 # 设置 ASPNETCORE_ENVIRONMENT 环境变量到 App Pool
                 Write-Host "Setting ASPNETCORE_ENVIRONMENT to: $aspnetEnv"
                 try {
-                    Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "processModel.environmentVariables" -Value @{ASPNETCORE_ENVIRONMENT=$aspnetEnv}
-                    Write-Host "✓ Environment variable set successfully"
+                    $appcmd = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
+                    
+                    # 先尝试添加环境变量（如果已存在会失败，但没关系）
+                    $addResult = & $appcmd set config -section:system.applicationHost/applicationPools "/+[name='$appPoolName'].environmentVariables.[name='ASPNETCORE_ENVIRONMENT',value='$aspnetEnv']" /commit:apphost 2>&1
+                    
+                    # 然后设置/更新值（确保值正确）
+                    $setResult = & $appcmd set config -section:system.applicationHost/applicationPools "/[name='$appPoolName'].environmentVariables.[name='ASPNETCORE_ENVIRONMENT'].value:$aspnetEnv" /commit:apphost 2>&1
+                    
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "✓ Environment variable set successfully: ASPNETCORE_ENVIRONMENT = $aspnetEnv"
+                    } else {
+                        Write-Host "##[warning]appcmd output: $setResult"
+                        Write-Host "##[error]Failed to set environment variable (exit code: $LASTEXITCODE)"
+                        exit 1
+                    }
                 } catch {
-                    Write-Host "##[warning]Could not set environment variable: $_"
+                    Write-Host "##[error]Could not set environment variable: $_"
+                    exit 1
                 }
 
                 # 启动 App Pool
@@ -302,11 +348,13 @@ stages:
                 Write-Host "  - Environment: $aspnetEnv"
 
 # ============================================
-# Stage 4: 部署到生产环境
+# Stage 5: 部署到生产环境
 # ============================================
 - stage: Deploy_Prod
   displayName: 'Deploy to Production IIS'
-  dependsOn: Build
+  dependsOn: 
+  - Build
+  - Test
   condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
   variables:
     iisDeployPath: 'Prod/project1'
@@ -387,10 +435,24 @@ stages:
                 # 设置 ASPNETCORE_ENVIRONMENT 环境变量到 App Pool
                 Write-Host "Setting ASPNETCORE_ENVIRONMENT to: $aspnetEnv"
                 try {
-                    Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "processModel.environmentVariables" -Value @{ASPNETCORE_ENVIRONMENT=$aspnetEnv}
-                    Write-Host "✓ Environment variable set successfully"
+                    $appcmd = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
+                    
+                    # 先尝试添加环境变量（如果已存在会失败，但没关系）
+                    $addResult = & $appcmd set config -section:system.applicationHost/applicationPools "/+[name='$appPoolName'].environmentVariables.[name='ASPNETCORE_ENVIRONMENT',value='$aspnetEnv']" /commit:apphost 2>&1
+                    
+                    # 然后设置/更新值（确保值正确）
+                    $setResult = & $appcmd set config -section:system.applicationHost/applicationPools "/[name='$appPoolName'].environmentVariables.[name='ASPNETCORE_ENVIRONMENT'].value:$aspnetEnv" /commit:apphost 2>&1
+                    
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "✓ Environment variable set successfully: ASPNETCORE_ENVIRONMENT = $aspnetEnv"
+                    } else {
+                        Write-Host "##[warning]appcmd output: $setResult"
+                        Write-Host "##[error]Failed to set environment variable (exit code: $LASTEXITCODE)"
+                        exit 1
+                    }
                 } catch {
-                    Write-Host "##[warning]Could not set environment variable: $_"
+                    Write-Host "##[error]Could not set environment variable: $_"
+                    exit 1
                 }
 
                 # 启动 App Pool
