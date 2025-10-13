@@ -13,15 +13,6 @@ variables:
   packableProjects: |
     **/*.Entities.csproj
     **/*.Services.csproj
-  # 根据分支设置部署路径和环境
-  ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
-    iisDeployPath: 'Prod/project1'
-    aspnetEnvironment: 'Production'
-    deployEnvironment: 'Production'
-  ${{ if eq(variables['Build.SourceBranchName'], 'develop') }}:
-    iisDeployPath: 'Projects/project1'
-    aspnetEnvironment: 'Development'
-    deployEnvironment: 'Development'
 
 stages:
 # ============================================
@@ -213,15 +204,19 @@ stages:
         allowPackageConflicts: true
 
 # ============================================
-# Stage 3: 部署到 IIS
+# Stage 3: 部署到开发环境
 # ============================================
-- stage: Deploy
-  displayName: 'Deploy to IIS'
+- stage: Deploy_Dev
+  displayName: 'Deploy to Development IIS'
   dependsOn: Build
-  condition: succeeded()
+  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'develop'))
+  variables:
+    iisDeployPath: 'Projects/project1'
+    aspnetEnvironment: 'Development'
+    deployEnvironment: 'Development'
   jobs:
   - deployment: DeployToIIS
-    displayName: 'Deploy to IIS Server'
+    displayName: 'Deploy to Development IIS Server'
     environment: $(deployEnvironment)
     strategy:
       runOnce:
@@ -232,7 +227,105 @@ stages:
             displayName: 'Download Deployment Package'
 
           - task: PowerShell@2
-            displayName: "Deploy to IIS (Branch: $(Build.SourceBranchName))"
+            displayName: "Deploy to IIS (Development)"
+            inputs:
+              targetType: 'inline'
+              script: |
+                Import-Module WebAdministration
+
+                $sitePath = "$(iisDeployPath)"
+                $zipFile = "$(Pipeline.Workspace)/deployment-package/package.zip"
+                $aspnetEnv = "$(aspnetEnvironment)"
+                $tempExtractPath = "$(Agent.TempDirectory)/extracted"
+
+                Write-Host "=== Starting IIS Deployment ==="
+                Write-Host "Branch: $(Build.SourceBranchName)"
+                Write-Host "Environment: $aspnetEnv"
+                Write-Host "IIS Site Path: $sitePath"
+                
+                $site = Get-Item "IIS:\Sites\$sitePath"
+
+                if (-not $site) {
+                  Write-Host "##[error]Site '$sitePath' not found in IIS."
+                  exit 1
+                }
+
+                $iisPath = $site.physicalPath
+                $appPoolName = $site.applicationPool
+                Write-Host "Target Path: $iisPath"
+                Write-Host "App Pool: $appPoolName"
+
+                # 清理旧文件夹
+                if (Test-Path $tempExtractPath) { Remove-Item $tempExtractPath -Recurse -Force }
+                New-Item -ItemType Directory -Path $tempExtractPath | Out-Null
+
+                # 解压部署包
+                Expand-Archive -Path $zipFile -DestinationPath $tempExtractPath -Force
+
+                # 若解压后只有一层目录，进入那一层
+                $items = Get-ChildItem $tempExtractPath
+                if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+                  $tempExtractPath = $items[0].FullName
+                }
+
+                # 停止 App Pool
+                try {
+                    $appPool = Get-WebAppPoolState -Name $appPoolName -ErrorAction SilentlyContinue
+                    if ($appPool.Value -eq "Started") {
+                        Write-Host "Stopping App Pool: $appPoolName"
+                        Stop-WebAppPool -Name $appPoolName -ErrorAction Stop
+                        Start-Sleep -Seconds 3
+                    } else {
+                        Write-Host "App Pool '$appPoolName' is already stopped. Skipping..."
+                    }
+                } catch {
+                    Write-Host "##[warning]Could not stop App Pool '$appPoolName' — it may not exist."
+                }
+
+                # 部署文件
+                Write-Host "Deploying files to: $iisPath"
+                Copy-Item "$tempExtractPath\*" $iisPath -Recurse -Force
+
+                # 设置 ASPNETCORE_ENVIRONMENT 环境变量到 App Pool
+                Write-Host "Setting ASPNETCORE_ENVIRONMENT to: $aspnetEnv"
+                try {
+                    Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "processModel.environmentVariables" -Value @{ASPNETCORE_ENVIRONMENT=$aspnetEnv}
+                    Write-Host "✓ Environment variable set successfully"
+                } catch {
+                    Write-Host "##[warning]Could not set environment variable: $_"
+                }
+
+                # 启动 App Pool
+                Start-WebAppPool -Name $appPoolName
+                Write-Host "✓ Deployment completed successfully"
+                Write-Host "  - Site: $sitePath"
+                Write-Host "  - Environment: $aspnetEnv"
+
+# ============================================
+# Stage 4: 部署到生产环境
+# ============================================
+- stage: Deploy_Prod
+  displayName: 'Deploy to Production IIS'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+  variables:
+    iisDeployPath: 'Prod/project1'
+    aspnetEnvironment: 'Production'
+    deployEnvironment: 'Production'
+  jobs:
+  - deployment: DeployToIIS
+    displayName: 'Deploy to Production IIS Server'
+    environment: $(deployEnvironment)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: deployment-package
+            displayName: 'Download Deployment Package'
+
+          - task: PowerShell@2
+            displayName: "Deploy to IIS (Production)"
             inputs:
               targetType: 'inline'
               script: |
