@@ -474,6 +474,8 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
+                Import-Module WebAdministration
+
                 $sitePath = "$(iisDeployPath)"
                 $site = Get-Item "IIS:\Sites\$sitePath"
                 $iisPath = $site.physicalPath
