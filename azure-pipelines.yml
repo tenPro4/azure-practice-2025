@@ -243,9 +243,13 @@ stages:
   - Test
   condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'develop'))
   variables:
-    iisDeployPath: 'Projects/project1'
-    aspnetEnvironment: 'Development'
-    deployEnvironment: 'Development'
+    - name: iisDeployPath
+      value: 'Projects/project1'
+    - name: aspnetEnvironment
+      value: 'Development'
+    - name: deployEnvironment
+      value: 'Development'
+    - group: dev-variables
   jobs:
   - deployment: DeployToIIS
     displayName: 'Deploy to Development IIS Server'
@@ -347,6 +351,47 @@ stages:
                 Write-Host "  - Site: $sitePath"
                 Write-Host "  - Environment: $aspnetEnv"
 
+          - task: PowerShell@2
+            displayName: "Override AppSettings (Development)"
+            inputs:
+              targetType: 'inline'
+              script: |
+                Import-Module WebAdministration
+
+                $sitePath = "$(iisDeployPath)"
+                $site = Get-Item "IIS:\Sites\$sitePath"
+                $iisPath = $site.physicalPath
+                $appsettingsPath = "$iisPath\appsettings.Development.json"
+
+                Write-Host "=== Updating AppSettings ==="
+                Write-Host "AppSettings Path: $appsettingsPath"
+                Write-Host "Environment Variable (Env): $(Env)"
+
+                if (-not (Test-Path $appsettingsPath)) {
+                    Write-Host "##[error]AppSettings file not found: $appsettingsPath"
+                    exit 1
+                }
+
+                try {
+                    # 读取 JSON 文件
+                    $json = Get-Content $appsettingsPath -Raw | ConvertFrom-Json
+                    
+                    # 更新 CustomSettings.Env 值
+                    if (-not $json.CustomSettings) {
+                        $json | Add-Member -MemberType NoteProperty -Name "CustomSettings" -Value ([PSCustomObject]@{})
+                    }
+                    $json.CustomSettings | Add-Member -MemberType NoteProperty -Name "Env" -Value "$(Env)" -Force
+                    
+                    # 保存回文件
+                    $json | ConvertTo-Json -Depth 10 | Set-Content $appsettingsPath -Encoding UTF8
+                    
+                    Write-Host "✓ AppSettings updated successfully"
+                    Write-Host "  - CustomSettings.Env = $(Env)"
+                } catch {
+                    Write-Host "##[error]Failed to update AppSettings: $_"
+                    exit 1
+                }
+
 # ============================================
 # Stage 5: 部署到生产环境
 # ============================================
@@ -357,9 +402,13 @@ stages:
   - Test
   condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
   variables:
-    iisDeployPath: 'Prod/project1'
-    aspnetEnvironment: 'Production'
-    deployEnvironment: 'Production'
+    - name: iisDeployPath
+      value: 'Prod/project1'
+    - name: aspnetEnvironment
+      value: 'Production'
+    - name: deployEnvironment
+      value: 'Production'
+    - group: prod-variables
   jobs:
   - deployment: DeployToIIS
     displayName: 'Deploy to Production IIS Server'
@@ -460,3 +509,44 @@ stages:
                 Write-Host "✓ Deployment completed successfully"
                 Write-Host "  - Site: $sitePath"
                 Write-Host "  - Environment: $aspnetEnv"
+
+          - task: PowerShell@2
+            displayName: "Override AppSettings (Production)"
+            inputs:
+              targetType: 'inline'
+              script: |
+                Import-Module WebAdministration
+
+                $sitePath = "$(iisDeployPath)"
+                $site = Get-Item "IIS:\Sites\$sitePath"
+                $iisPath = $site.physicalPath
+                $appsettingsPath = "$iisPath\appsettings.Production.json"
+
+                Write-Host "=== Updating AppSettings ==="
+                Write-Host "AppSettings Path: $appsettingsPath"
+                Write-Host "Environment Variable (Env): $(Env)"
+
+                if (-not (Test-Path $appsettingsPath)) {
+                    Write-Host "##[error]AppSettings file not found: $appsettingsPath"
+                    exit 1
+                }
+
+                try {
+                    # 读取 JSON 文件
+                    $json = Get-Content $appsettingsPath -Raw | ConvertFrom-Json
+                    
+                    # 更新 CustomSettings.Env 值
+                    if (-not $json.CustomSettings) {
+                        $json | Add-Member -MemberType NoteProperty -Name "CustomSettings" -Value ([PSCustomObject]@{})
+                    }
+                    $json.CustomSettings | Add-Member -MemberType NoteProperty -Name "Env" -Value "$(Env)" -Force
+                    
+                    # 保存回文件
+                    $json | ConvertTo-Json -Depth 10 | Set-Content $appsettingsPath -Encoding UTF8
+                    
+                    Write-Host "✓ AppSettings updated successfully"
+                    Write-Host "  - CustomSettings.Env = $(Env)"
+                } catch {
+                    Write-Host "##[error]Failed to update AppSettings: $_"
+                    exit 1
+                }
